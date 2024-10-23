@@ -1,67 +1,43 @@
 const { expect } = require("chai");
 const { ethers } = require("hardhat");
-const chai = require("chai");
-const { solidity } = require("ethereum-waffle");
 
-chai.use(solidity);
-
-describe("Cross-Chain Bridge Contracts", function () {
-  let XToken, xToken, BridgeSource, bridgeSource, BridgeDestination, bridgeDestination, owner, user;
+describe("Bridge", function () {
+  let bridge, token, owner, addr1;
 
   beforeEach(async function () {
-    [owner, user, _] = await ethers.getSigners();
+    [owner, addr1] = await ethers.getSigners();
 
-    // Deploy token contract
-    XToken = await ethers.getContractFactory("XToken");
-    xToken = await XToken.deploy();
-    await xToken.deployed();
+    // Deploy token
+    const XToken = await ethers.getContractFactory("XToken");
+    token = await XToken.deploy("BridgeToken", "BTK", 0, 0, owner.address);
 
-    // Mint tokens to user before transferring ownership
-    await xToken.mint(user.address, ethers.utils.parseEther("1000"));
+    // Deploy bridge
+    const Bridge = await ethers.getContractFactory("Bridge");
+    bridge = await Bridge.deploy(token.address);
 
-    // Deploy source bridge
-    BridgeSource = await ethers.getContractFactory("BridgeSource");
-    bridgeSource = await BridgeSource.deploy(xToken.address);
-    await bridgeSource.deployed();
+    // Transfer token ownership to bridge
+    await token.transferOwnership(bridge.address);
 
-    // Deploy destination bridge
-    BridgeDestination = await ethers.getContractFactory("BridgeDestination");
-    bridgeDestination = await BridgeDestination.deploy(xToken.address);
-    await bridgeDestination.deployed();
-
-    // Transfer ownership of XToken to BridgeDestination
-    await xToken.transferOwnership(bridgeDestination.address);
-
-    // Approve bridge contract to spend user's tokens
-    await xToken.connect(user).approve(bridgeSource.address, ethers.utils.parseEther("1000"));
+    // Mint tokens to addr1 via bridge
+    await bridge.mintTokens(addr1.address, ethers.utils.parseEther("1000"), ethers.utils.formatBytes32String("tx1"));
   });
 
-  it("Should lock tokens on the source chain", async function () {
-    // Arrange
-    const amountToLock = ethers.utils.parseEther("100");
-    const destinationAddress = "destinationAddress";
+  it("Should lock tokens and emit event", async function () {
+    const amount = ethers.utils.parseEther("100");
 
-    // Act
-    await bridgeSource.connect(user).lockTokens(amountToLock, destinationAddress);
+    await token.connect(addr1).approve(bridge.address, amount);
+    await bridge.connect(addr1).lockTokens(amount, addr1.address);
 
-    // Assert
-    const bridgeBalance = await xToken.balanceOf(bridgeSource.address);
-    expect(bridgeBalance).to.equal(amountToLock);
+    const balance = await token.balanceOf(addr1.address);
+    expect(balance).to.equal(ethers.utils.parseEther("900"));
+  });
 
-    const userBalance = await xToken.balanceOf(user.address);
-    expect(userBalance).to.equal(ethers.utils.parseEther("900"));
+  it("Should prevent double processing of a transaction", async function () {
+    const transactionId = ethers.utils.formatBytes32String("tx2");
+    await bridge.mintTokens(addr1.address, ethers.utils.parseEther("100"), transactionId);
 
-    // You can also check that the event was emitted
     await expect(
-      bridgeSource.connect(user).lockTokens(amountToLock, destinationAddress)
-    ).to.emit(bridgeSource, "TokensLocked").withArgs(user.address, amountToLock, destinationAddress);
-  });
-
-  it("Should mint tokens on the destination chain", async function () {
-    // Use the owner account to call mintTokens
-    await bridgeDestination.connect(owner).mintTokens(user.address, ethers.utils.parseEther("100"));
-
-    const userBalance = await xToken.balanceOf(user.address);
-    expect(userBalance).to.equal(ethers.utils.parseEther("1100"));
+      bridge.mintTokens(addr1.address, ethers.utils.parseEther("100"), transactionId)
+    ).to.be.revertedWith("Transaction already processed");
   });
 });

@@ -1,91 +1,83 @@
 const { expect } = require("chai");
 const { ethers } = require("hardhat");
-const chai = require("chai");
-const { solidity } = require("ethereum-waffle");
 
-chai.use(solidity);
-
-describe("LiquidityPool Contract", function () {
-  let XToken, YToken, xToken, yToken, LiquidityPool, liquidityPool, owner, addr1;
+describe("LiquidityPool", function () {
+  let pool, lpToken, tokenA, tokenB, owner, addr1;
 
   beforeEach(async function () {
-    [owner, addr1, _] = await ethers.getSigners();
+    [owner, addr1] = await ethers.getSigners();
 
-    XToken = await ethers.getContractFactory("XToken");
-    YToken = await ethers.getContractFactory("XToken"); // Using XToken as a placeholder for YToken
-    xToken = await XToken.deploy();
-    yToken = await YToken.deploy();
-    await xToken.deployed();
-    await yToken.deployed();
+    // Deploy tokens
+    const MockERC20 = await ethers.getContractFactory("MockERC20");
+    tokenA = await MockERC20.deploy("TokenA", "TKA", ethers.utils.parseEther("1000000"));
+    tokenB = await MockERC20.deploy("TokenB", "TKB", ethers.utils.parseEther("1000000"));
 
-    LiquidityPool = await ethers.getContractFactory("LiquidityPool");
-    liquidityPool = await LiquidityPool.deploy(xToken.address, yToken.address);
-    await liquidityPool.deployed();
+    // Deploy pool
+    const LiquidityPool = await ethers.getContractFactory("LiquidityPool");
+    pool = await LiquidityPool.deploy(tokenA.address, tokenB.address);
 
-    // Mint and approve tokens for liquidity pool
-    await xToken.mint(owner.address, ethers.utils.parseEther("1000000"));
-    await yToken.mint(owner.address, ethers.utils.parseEther("1000000"));
-    await xToken.mint(addr1.address, ethers.utils.parseEther("1000000"));
-    await yToken.mint(addr1.address, ethers.utils.parseEther("1000000"));
-
-    await xToken.approve(liquidityPool.address, ethers.utils.parseEther("1000000"));
-    await yToken.approve(liquidityPool.address, ethers.utils.parseEther("1000000"));
-    await xToken.connect(addr1).approve(liquidityPool.address, ethers.utils.parseEther("1000000"));
-    await yToken.connect(addr1).approve(liquidityPool.address, ethers.utils.parseEther("1000000"));
-  });
-
-  it("Should add liquidity correctly", async function () {
-    await liquidityPool.addLiquidity(
-      ethers.utils.parseEther("1000"),
-      ethers.utils.parseEther("1000")
-    );
-
-    const reserveA = await liquidityPool.reserveA();
-    const reserveB = await liquidityPool.reserveB();
-
-    expect(reserveA).to.equal(ethers.utils.parseEther("1000"));
-    expect(reserveB).to.equal(ethers.utils.parseEther("1000"));
-  });
-
-  it("Should allow swapping tokens", async function () {
-    // Add liquidity
-    await liquidityPool.addLiquidity(
-      ethers.utils.parseEther("1000"),
-      ethers.utils.parseEther("1000")
-    );
+    // Get LP Token
+    const lpTokenAddress = await pool.lpToken();
+    lpToken = await ethers.getContractAt("LiquidityProvider", lpTokenAddress);
 
     // Transfer tokens to addr1
-    await xToken.transfer(addr1.address, ethers.utils.parseEther("100"));
-    await xToken.connect(addr1).approve(liquidityPool.address, ethers.utils.parseEther("100"));
-
-    // Swap XToken for YToken
-    await liquidityPool
-      .connect(addr1)
-      .swap(xToken.address, ethers.utils.parseEther("10"));
-
-    const addr1YBalance = await yToken.balanceOf(addr1.address);
-
-    // Addr1 should have received YTokens
-    expect(addr1YBalance).to.be.gt(ethers.constants.Zero);
+    await tokenA.transfer(addr1.address, ethers.utils.parseEther("10000"));
+    await tokenB.transfer(addr1.address, ethers.utils.parseEther("10000"));
   });
 
-  it("Should remove liquidity correctly", async function () {
-    // Add liquidity
-    await liquidityPool.addLiquidity(
-      ethers.utils.parseEther("1000"),
-      ethers.utils.parseEther("1000")
-    );
+  it("Should add liquidity and mint LP tokens", async function () {
+    const amountA = ethers.utils.parseEther("1000");
+    const amountB = ethers.utils.parseEther("1000");
 
-    const initialXBalance = await xToken.balanceOf(owner.address);
-    const initialYBalance = await yToken.balanceOf(owner.address);
+    // Approve tokens
+    await tokenA.connect(addr1).approve(pool.address, amountA);
+    await tokenB.connect(addr1).approve(pool.address, amountB);
+
+    // Add liquidity
+    await pool.connect(addr1).addLiquidity(amountA, amountB);
+
+    // Check LP token balance
+    const lpBalance = await lpToken.balanceOf(addr1.address);
+    expect(lpBalance).to.be.gt(0);
+  });
+
+  it("Should swap tokens", async function () {
+    // Add liquidity first
+    const amountA = ethers.utils.parseEther("1000");
+    const amountB = ethers.utils.parseEther("1000");
+    await tokenA.connect(addr1).approve(pool.address, amountA);
+    await tokenB.connect(addr1).approve(pool.address, amountB);
+    await pool.connect(addr1).addLiquidity(amountA, amountB);
+
+    // Swap tokenA for tokenB
+    const swapAmount = ethers.utils.parseEther("100");
+    await tokenA.connect(addr1).approve(pool.address, swapAmount);
+
+    const balanceBefore = await tokenB.balanceOf(addr1.address);
+    await pool.connect(addr1).swap(tokenA.address, swapAmount, 0);
+    const balanceAfter = await tokenB.balanceOf(addr1.address);
+
+    expect(balanceAfter).to.be.gt(balanceBefore);
+  });
+
+  it("Should remove liquidity and burn LP tokens", async function () {
+    // Add liquidity first
+    const amountA = ethers.utils.parseEther("1000");
+    const amountB = ethers.utils.parseEther("1000");
+    await tokenA.connect(addr1).approve(pool.address, amountA);
+    await tokenB.connect(addr1).approve(pool.address, amountB);
+    await pool.connect(addr1).addLiquidity(amountA, amountB);
+
+    const lpBalance = await lpToken.balanceOf(addr1.address);
+
+    // Approve LP tokens
+    await lpToken.connect(addr1).approve(pool.address, lpBalance);
 
     // Remove liquidity
-    await liquidityPool.removeLiquidity(ethers.utils.parseEther("500"));
+    await pool.connect(addr1).removeLiquidity(lpBalance);
 
-    const finalXBalance = await xToken.balanceOf(owner.address);
-    const finalYBalance = await yToken.balanceOf(owner.address);
-
-    expect(finalXBalance).to.be.gt(initialXBalance);
-    expect(finalYBalance).to.be.gt(initialYBalance);
+    // Check LP token balance
+    const lpBalanceAfter = await lpToken.balanceOf(addr1.address);
+    expect(lpBalanceAfter).to.equal(0);
   });
 });
